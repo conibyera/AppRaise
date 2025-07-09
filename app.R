@@ -1,3 +1,13 @@
+################################################################################
+#The R Shiny code used in this paper is released under the #GNU General Public 
+#License (GPL).Users are free to use, modify, and distribute the code under the
+#terms of the GPL.
+#
+#AppRaise free software: you can redistribute it and/or modify it under the terms
+#of the GNU General Public License as published by the Free Software Foundation, 
+#either version 3 of the License, or (at your option) any later version.
+################################################################################
+
 library(shiny)
 library(shinyjs)
 library(rstan)
@@ -8,7 +18,7 @@ library(ggplot2)
 library(shinycssloaders)
 library(cmdstanr)
 library(posterior)
-#library(extraDistr)
+
 # Set the number of cores to use for parallel processing
 options(mc.cores = parallel::detectCores())
 
@@ -122,7 +132,7 @@ ui <- fluidPage(
     
    ")),
   div(class = "title-container", 
-      h1("AppRaise: A Tool for Quantifying Uncertainty in Systematic Reviews Using a Bayesian Mixture Model")
+      h1("AppRaise: A Tool for Quantifying Uncertainty in Systematic Reviews Using a Posterior Mixture Model")
   ),
   sidebarLayout(
     sidebarPanel(class = "sidebar",
@@ -200,7 +210,7 @@ server <- function(input, output, session) {
             
             tags$h5("Citing the App:", 
                     style = "color:#003366; font-weight:bold;"),
-            paste("Kabali C. APPRAISE: A Tool for Quantifying Uncertainty in Evidence Based Decisions Using a Bayesian Mixture Model [Internet]. [cited", format(Sys.Date(), "%b %d %Y"), "]. Available from: https://kabali.shinyapps.io/appraise/.", 
+            paste("Kabali C. AppRaise: A Tool for Quantifying Uncertainty in Systematic Reviews Using a Posterior Mixture Model [Internet]. [cited", format(Sys.Date(), "%b %d %Y"), "]. Available through: https://conibyera.github.io/appraise-start/", 
                   sep = " "),
             tags$p(" "),
             p("For any questions please contact Conrad Kabali at conrad.kabali@utoronto.ca.")
@@ -211,7 +221,7 @@ server <- function(input, output, session) {
   bias_map <- c("Confounding" = 1, "Selection Bias" = 2, "Measurement Errors" = 3, "Model Misspecification" = 4, "Other Bias" = 5)
   
   # Reactive values to store study data
-  study_data <- reactiveValues(names = character(), weights = numeric(), mid_values = numeric())
+  study_data <- reactiveValues(names = character(), weights = numeric(), mid_values = numeric(), theta_samples = numeric())
   
   
   generate_numeric_input <- function(id_prefix, bias_number, label_prefix, default_value = 999, min_value = 0.001) {
@@ -409,7 +419,7 @@ server <- function(input, output, session) {
       withProgress(message = 'Running model', detail= 'please wait...', value = 0.25, {
         tryCatch({
           mod <- cmdstan_model("model.stan")
-          fit <- mod$sample(data = model_data, iter_sampling = 5000, iter_warmup = 1000,parallel_chains = 4)
+          fit <- mod$sample(data = model_data, iter_sampling = 5000, iter_warmup = 1000, seed = 12345, parallel_chains = 4)
           
           
           incProgress(1)
@@ -449,6 +459,11 @@ server <- function(input, output, session) {
             study_data$names <- c(study_data$names, study_name)
             study_data$weights <- c(study_data$weights, study_weight)
             study_data$mid_values <- c(study_data$mid_values, study_mid_value)
+            
+            if (is.null(study_data$theta_samples)) {
+              study_data$theta_samples <- list()
+            }
+            study_data$theta_samples <- append(study_data$theta_samples, list(as.vector(theta_samples)))
           })
           
           print(fit$summary())
@@ -558,7 +573,7 @@ server <- function(input, output, session) {
           output$posterior_text <- renderUI({
             HTML(paste("The probability that ", input$scale_measure, " exceeds ", threshold_value(), " is ",mean((fit$draws(variables = "mid"))*100),"%. It is based on evidence
                         reviewed in only a singe study by ",input$study_name, ". This probability can change after  
-                        combining evidence across multple studies using a Bayesian mixture model, as reported in the 'Probability of Significance' tab."))
+                        combining evidence across multple studies using a posterior mixture model, as reported in the 'Probability of Significance' tab."))
           })
           
           
@@ -587,11 +602,34 @@ server <- function(input, output, session) {
           output$weighted_average_value <- renderUI({
             weights <- study_data$weights
             mid_values <- study_data$mid_values
+            theta_samples_list <- study_data$theta_samples  # now a list of numeric vectors
+            
             if (length(weights) > 0 && length(mid_values) > 0) {
+              # Weighted average of midpoints
               weighted_avg <- sum(weights * mid_values) / sum(weights)
-              tagList(tags$h1(""),tags$p("After reviewing the body of evidence and accounting for the studies' limitations, the probability of the predicted ",input$scale_measure, " exceeding ", input$threshold_value, " (the threshold for significance) is ", round(weighted_avg, 3)*100,"%."))
+              
+              # Weighted posterior mean (mean of each vector times its weight)
+              posterior_mean <- sum(weights * sapply(theta_samples_list, mean)) / sum(weights)
+              
+              # Weighted posterior distribution
+              rep_counts <- pmax(round(weights * 10), 1)
+              weighted_samples <- unlist(
+                mapply(function(samples, count) rep(samples, count),
+                       theta_samples_list, rep_counts, SIMPLIFY = FALSE)
+              )
+              
+              posterior_int <- quantile(weighted_samples, probs = c(0.025, 0.975))
+              
+              tagList(
+                tags$h1(""),
+                tags$p("After reviewing the body of evidence and accounting for the studies' limitations, the probability of the predicted ",
+                       input$scale_measure, " exceeding ", input$threshold_value,
+                       " (the threshold for significance) is ", round(weighted_avg, 3) * 100, "%."),
+                tags$p("The posterior ", input$scale_measure, " is ", round(posterior_mean, 3),
+                       " with 95% credible limits [", round(posterior_int[1], 2), ", ", round(posterior_int[2], 2), "]")
+              )
             } else {
-              tagList(tags$h1(""),tags$p("No studies to calculate the probability"))
+              tagList(tags$h1(""), tags$p("No studies to calculate the probability"))
             }
           })
           
